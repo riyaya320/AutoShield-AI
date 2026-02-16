@@ -1,0 +1,160 @@
+
+*** Cleaning up old Mininet state
+
+*** Loading PPO model: models/ppo/final_model.zip
+
+*** Building & starting Mininet
+*** Creating network
+*** Adding hosts:
+fw hatk1 hatk2 hleg1 hleg2 srv 
+*** Adding switches:
+s1 s2 
+*** Adding links:
+(50.00Mbit 2ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(50.00Mbit 2ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(fw, s2) (100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(hatk1, s1) (100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(hatk2, s1) (100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(hleg1, s1) (100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(hleg2, s1) (100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(s1, fw) (50.00Mbit 2ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(50.00Mbit 2ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(s2, srv) 
+*** Configuring hosts
+fw hatk1 hatk2 hleg1 hleg2 srv 
+*** Starting controller
+
+*** Starting 2 switches
+s1 s2 ...(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(100.00Mbit 1ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(50.00Mbit 2ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+(50.00Mbit 2ms delay) *** Error: Warning: sch_htb: quantum of class 50001 is big. Consider r2q change.
+
+
+ *** DEBUG: MNCOUNT inside fw namespace
+Chain MNCOUNT (1 references)
+    pkts      bytes target     prot opt in     out     source               destination         
+       0        0 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_TOTAL */ MARK set 0x1
+       0        0 MARK       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_TCP */ MARK set 0x1
+       0        0 MARK       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_UDP */ MARK set 0x1
+       0        0 MARK       icmp --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_ICMP */ MARK set 0x1
+       0        0 MARK       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp flags:0x02/0x02 /* MN_SYN */ MARK set 0x1
+       0        0 MARK       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp flags:0x10/0x10 /* MN_ACK */ MARK set 0x1
+
+
+*** DEBUG: fw interfaces after IP assignment
+[1;36mlo               [0mUNKNOWN        [1;35m127.0.0.1[0m/8 [1;94m::1[0m/128 
+[1;36mfw-eth1@if174    [0m[1;32mUP             [0m[1;35m10.0.2.1[0m/24 
+[1;36mfw-eth0@if179    [0m[1;32mUP             [0m[1;35m10.0.1.1[0m/24 
+
+*** fw_lan=fw-eth0, fw_wan=fw-eth1
+
+*** Starting iperf3 server on srv
+
+*** DEBUG: MNCOUNT rules inside fw namespace
+-P PREROUTING ACCEPT
+-N MNCOUNT
+-A PREROUTING -j MNCOUNT
+-A MNCOUNT -m comment --comment MN_TOTAL -j MARK --set-xmark 0x1/0xffffffff
+-A MNCOUNT -p tcp -m comment --comment MN_TCP -j MARK --set-xmark 0x1/0xffffffff
+-A MNCOUNT -p udp -m comment --comment MN_UDP -j MARK --set-xmark 0x1/0xffffffff
+-A MNCOUNT -p icmp -m comment --comment MN_ICMP -j MARK --set-xmark 0x1/0xffffffff
+-A MNCOUNT -p tcp -m tcp --tcp-flags SYN,ACK SYN -m comment --comment MN_SYN -j MARK --set-xmark 0x1/0xffffffff
+-A MNCOUNT -p tcp -m tcp --tcp-flags SYN,ACK ACK -m comment --comment MN_ACK -j MARK --set-xmark 0x1/0xffffffff
+
+Chain MNCOUNT (1 references)
+    pkts      bytes target     prot opt in     out     source               destination         
+      14    34092 MARK       all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_TOTAL */ MARK set 0x1
+      11    23788 MARK       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_TCP */ MARK set 0x1
+       0        0 MARK       udp  --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_UDP */ MARK set 0x1
+       0        0 MARK       icmp --  *      *       0.0.0.0/0            0.0.0.0/0            /* MN_ICMP */ MARK set 0x1
+       0        0 MARK       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp flags:0x12/0x02 /* MN_SYN */ MARK set 0x1
+       3     7396 MARK       tcp  --  *      *       0.0.0.0/0            0.0.0.0/0            tcp flags:0x12/0x10 /* MN_ACK */ MARK set 0x1
+
+
+=== Phase: warmup_legit (8s) ===
+[t=0.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.1ms loss=0.00 syn/ack=0.03
+[t=1.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.3ms loss=0.00 syn/ack=1.00
+[t=2.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.3ms loss=0.00 syn/ack=1.00
+[t=3.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.3ms loss=0.00 syn/ack=1.00
+[t=4.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.3ms loss=0.00 syn/ack=1.00
+[t=5.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.2ms loss=0.00 syn/ack=1.00
+[t=6.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.3ms loss=0.00 syn/ack=1.00
+[t=7.6s] phase=warmup_legit action=0 (ALLOW_ALL) lat=10.8ms loss=0.00 syn/ack=1.00
+
+=== Phase: syn_flood (10s) ===
+[t=8.7s] phase=syn_flood action=6 (BLOCK_ICMP) lat=10.1ms loss=0.00 syn/ack=1.00
+[t=10.7s] phase=syn_flood action=7 (GLOBAL_RATE_LIMIT) lat=1000.0ms loss=1.00 syn/ack=50.00
+[t=10.8s] phase=syn_flood action=3 (RATE_LIMIT_ICMP) lat=10.1ms loss=0.00 syn/ack=50.00
+[t=11.8s] phase=syn_flood action=4 (BLOCK_TCP) lat=10.2ms loss=0.00 syn/ack=-471598.18
+[t=12.8s] phase=syn_flood action=7 (GLOBAL_RATE_LIMIT) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=13.8s] phase=syn_flood action=3 (RATE_LIMIT_ICMP) lat=10.1ms loss=0.00 syn/ack=0.00
+[t=14.8s] phase=syn_flood action=3 (RATE_LIMIT_ICMP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=15.8s] phase=syn_flood action=1 (RATE_LIMIT_TCP) lat=10.1ms loss=0.00 syn/ack=0.00
+[t=16.8s] phase=syn_flood action=2 (RATE_LIMIT_UDP) lat=10.1ms loss=0.00 syn/ack=0.00
+[t=17.8s] phase=syn_flood action=5 (BLOCK_UDP) lat=10.1ms loss=0.00 syn/ack=0.00
+
+=== Phase: udp_flood (10s) ===
+[t=18.8s] phase=udp_flood action=0 (ALLOW_ALL) lat=10.1ms loss=0.00 syn/ack=0.00
+[t=19.8s] phase=udp_flood action=4 (BLOCK_TCP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=20.9s] phase=udp_flood action=6 (BLOCK_ICMP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=22.9s] phase=udp_flood action=1 (RATE_LIMIT_TCP) lat=1000.0ms loss=1.00 syn/ack=0.00
+[t=23.0s] phase=udp_flood action=7 (GLOBAL_RATE_LIMIT) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=24.0s] phase=udp_flood action=6 (BLOCK_ICMP) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=26.1s] phase=udp_flood action=7 (GLOBAL_RATE_LIMIT) lat=1000.0ms loss=1.00 syn/ack=0.00
+[t=26.2s] phase=udp_flood action=3 (RATE_LIMIT_ICMP) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=27.2s] phase=udp_flood action=6 (BLOCK_ICMP) lat=10.9ms loss=0.00 syn/ack=0.00
+[t=29.2s] phase=udp_flood action=2 (RATE_LIMIT_UDP) lat=1000.0ms loss=1.00 syn/ack=0.00
+
+=== Phase: icmp_flood (10s) ===
+[t=29.4s] phase=icmp_flood action=6 (BLOCK_ICMP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=31.4s] phase=icmp_flood action=7 (GLOBAL_RATE_LIMIT) lat=1000.0ms loss=1.00 syn/ack=0.00
+[t=31.5s] phase=icmp_flood action=1 (RATE_LIMIT_TCP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=32.5s] phase=icmp_flood action=4 (BLOCK_TCP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=33.5s] phase=icmp_flood action=7 (GLOBAL_RATE_LIMIT) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=34.5s] phase=icmp_flood action=4 (BLOCK_TCP) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=35.5s] phase=icmp_flood action=6 (BLOCK_ICMP) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=37.5s] phase=icmp_flood action=1 (RATE_LIMIT_TCP) lat=1000.0ms loss=1.00 syn/ack=0.00
+[t=37.7s] phase=icmp_flood action=3 (RATE_LIMIT_ICMP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=38.7s] phase=icmp_flood action=4 (BLOCK_TCP) lat=10.3ms loss=0.00 syn/ack=0.00
+
+=== Phase: multi_vector (12s) ===
+[t=39.7s] phase=multi_vector action=7 (GLOBAL_RATE_LIMIT) lat=10.1ms loss=0.00 syn/ack=0.00
+[t=41.1s] phase=multi_vector action=5 (BLOCK_UDP) lat=353.0ms loss=0.00 syn/ack=0.00
+[t=41.8s] phase=multi_vector action=2 (RATE_LIMIT_UDP) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=42.7s] phase=multi_vector action=3 (RATE_LIMIT_ICMP) lat=10.8ms loss=0.00 syn/ack=0.00
+[t=43.8s] phase=multi_vector action=2 (RATE_LIMIT_UDP) lat=52.4ms loss=0.00 syn/ack=0.00
+[t=44.7s] phase=multi_vector action=4 (BLOCK_TCP) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=45.7s] phase=multi_vector action=0 (ALLOW_ALL) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=46.8s] phase=multi_vector action=3 (RATE_LIMIT_ICMP) lat=13.8ms loss=0.00 syn/ack=0.00
+[t=48.7s] phase=multi_vector action=6 (BLOCK_ICMP) lat=1000.0ms loss=1.00 syn/ack=0.00
+[t=49.8s] phase=multi_vector action=2 (RATE_LIMIT_UDP) lat=1000.0ms loss=1.00 syn/ack=0.00
+[t=49.9s] phase=multi_vector action=5 (BLOCK_UDP) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=51.0s] phase=multi_vector action=1 (RATE_LIMIT_TCP) lat=10.7ms loss=0.00 syn/ack=0.00
+
+=== Phase: cooldown_legit (6s) ===
+[t=52.0s] phase=cooldown_legit action=0 (ALLOW_ALL) lat=10.3ms loss=0.00 syn/ack=0.00
+[t=53.0s] phase=cooldown_legit action=0 (ALLOW_ALL) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=54.0s] phase=cooldown_legit action=0 (ALLOW_ALL) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=55.0s] phase=cooldown_legit action=0 (ALLOW_ALL) lat=10.2ms loss=0.00 syn/ack=0.00
+[t=56.0s] phase=cooldown_legit action=0 (ALLOW_ALL) lat=10.6ms loss=0.00 syn/ack=0.00
+[t=57.0s] phase=cooldown_legit action=0 (ALLOW_ALL) lat=12.0ms loss=0.00 syn/ack=0.00
+
+*** Done. CSV saved to: experiments/mininet_ppo.csv
+*** Stopping 0 controllers
+
+*** Stopping 7 links
+.......
+*** Stopping 2 switches
+s1 s2 
+*** Stopping 6 hosts
+fw hatk1 hatk2 hleg1 hleg2 srv 
+*** Done

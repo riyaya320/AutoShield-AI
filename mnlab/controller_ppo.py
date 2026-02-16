@@ -1,0 +1,582 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import time
+import re
+import threading
+from dataclasses import dataclass
+from typing import List, Optional
+
+from stable_baselines3 import PPO
+
+from mininet.net import Mininet
+from mininet.node import OVSSwitch
+from mininet.link import TCLink
+from mininet.log import setLogLevel, info
+from mininet.cli import CLI
+
+from mnlab.topo import DDoSFirewallTopo, setup_ip_routing, install_mncount_rules
+from mnlab.firewall_actions import apply_action, detect_fw_ifaces, reset_firewall
+from mnlab.feature_adapter import (
+    LinkConfig,
+    MininetFeatureAdapter,
+    install_counting_rules,
+    ping_latency_and_loss,
+    action_to_mode_level,
+)
+
+
+# ----------------------------
+# Scenario phases (AUTOMATED MODE)
+# ----------------------------
+@dataclass
+class ScenarioPhase:
+    name: str
+    duration_s: int
+
+
+DEFAULT_PHASES: List[ScenarioPhase] = [
+    ScenarioPhase("warmup_legit", 8),
+    ScenarioPhase("syn_flood", 10),
+    ScenarioPhase("udp_flood", 10),
+    ScenarioPhase("icmp_flood", 10),
+    ScenarioPhase("multi_vector", 12),
+    ScenarioPhase("cooldown_legit", 6),
+]
+
+
+# ----------------------------
+# Services + legit traffic
+# ----------------------------
+def start_services_on_server(srv) -> None:
+    """
+    Start iperf3 server on srv (useful for throughput tests).
+    Do NOT start python http.server because you're using Laravel as the real service.
+    """
+    srv.cmd("pkill -f 'iperf3 -s' 2>/dev/null || true")
+    srv.cmd("iperf3 -s -D --logfile /tmp/iperf3_srv.log")
+
+
+def stop_legit_generators(*hosts) -> None:
+    for h in hosts:
+        h.cmd("pkill -f 'iperf3 -c' 2>/dev/null || true")
+        h.cmd("pkill -f \"curl -s -o /dev/null\" 2>/dev/null || true")
+        h.cmd("pkill -f \"wget -q\" 2>/dev/null || true")
+
+
+def start_legit_generators(hleg1, hleg2, srv_ip: str, http_port: int = 80) -> None:
+    """
+    Background legit traffic loops (iperf + HTTP GET latency samples).
+    """
+    stop_legit_generators(hleg1, hleg2)
+
+    # iperf3 loops
+    hleg1.cmd(
+        "bash -lc \"while true; do "
+        f"iperf3 -c {srv_ip} -t 2 -p 5201 >>/tmp/leg_iperf_hleg1.log 2>&1; "
+        "sleep 0.2; done\" &"
+    )
+    hleg2.cmd(
+        "bash -lc \"while true; do "
+        f"iperf3 -c {srv_ip} -t 2 -p 5201 >>/tmp/leg_iperf_hleg2.log 2>&1; "
+        "sleep 0.2; done\" &"
+    )
+
+    # HTTP GET loops (time_total per request)
+    hleg1.cmd(
+        "bash -lc \"while true; do "
+        f"curl -s -o /dev/null -w '%{{time_total}}\\n' http://{srv_ip}:{http_port}/ "
+        ">>/tmp/leg_http_hleg1.log 2>&1; sleep 0.2; done\" &"
+    )
+    hleg2.cmd(
+        "bash -lc \"while true; do "
+        f"curl -s -o /dev/null -w '%{{time_total}}\\n' http://{srv_ip}:{http_port}/ "
+        ">>/tmp/leg_http_hleg2.log 2>&1; sleep 0.2; done\" &"
+    )
+
+
+def read_legit_iperf_mbps(host) -> float:
+    """
+    Reads last throughput line from /tmp/leg_iperf_<host>.log and returns Mbps.
+    """
+    out = host.cmd(f"tail -n 12 /tmp/leg_iperf_{host.name}.log 2>/dev/null")
+    m = re.findall(r"([\d\.]+)\s*Mbits/sec", out)
+    return float(m[-1]) if m else 0.0
+
+
+# ----------------------------
+# Traffic helpers (AUTOMATED MODE ONLY)
+# ----------------------------
+def _kill_traffic(h) -> None:
+    h.cmd("pkill -f iperf3 2>/dev/null || true")
+    h.cmd("pkill -f hping3 2>/dev/null || true")
+    h.cmd("pkill -f 'ping -f' 2>/dev/null || true")
+
+
+def start_syn_flood(hatk, srv_ip: str) -> None:
+    _kill_traffic(hatk)
+    hatk.cmd(f"hping3 -S -p 80 --flood --rand-source {srv_ip} >/tmp/syn.log 2>&1 &")
+
+
+def start_udp_flood(hatk, srv_ip: str, mbit: int = 300) -> None:
+    hatk.cmd("pkill -f iperf3 2>/dev/null || true")
+    hatk.cmd(f"iperf3 -u -c {srv_ip} -b {mbit}M -t 3600 >/tmp/udp.log 2>&1 &")
+
+
+def start_icmp_flood(hatk, srv_ip: str) -> None:
+    hatk.cmd("pkill -f 'ping -f' 2>/dev/null || true")
+    hatk.cmd(f"ping -f {srv_ip} >/tmp/icmp.log 2>&1 &")
+
+
+def start_multi_vector(hatk1, hatk2, srv_ip: str) -> None:
+    _kill_traffic(hatk1)
+    _kill_traffic(hatk2)
+    hatk1.cmd(f"hping3 --syn --flood -p 80 {srv_ip} >/tmp/mv_syn.log 2>&1 &")
+    hatk2.cmd(f"iperf3 -u -c {srv_ip} -b 300M -t 3600 >/tmp/mv_udp.log 2>&1 &")
+
+
+def apply_phase(phase: str, hleg1, hatk1, hatk2, srv_ip: str) -> None:
+    """
+    AUTOMATED mode: create attack phases.
+    LIVE mode does NOT call this.
+    """
+    # keep legit TCP presence (optional; your "legit_generators" already run too)
+    hleg1.cmd("pkill -f iperf3 2>/dev/null || true")
+    hleg1.cmd(f"iperf3 -c {srv_ip} -t 3600 >/tmp/legit_tcp.log 2>&1 &")
+
+    if phase in ("warmup_legit", "cooldown_legit"):
+        _kill_traffic(hatk1)
+        _kill_traffic(hatk2)
+        return
+
+    if phase == "syn_flood":
+        start_syn_flood(hatk1, srv_ip)
+        _kill_traffic(hatk2)
+        hatk2.cmd(f"hping3 -S -p 80 --flood --rand-source {srv_ip} >/tmp/syn2.log 2>&1 &")
+        return
+
+    if phase == "udp_flood":
+        start_udp_flood(hatk1, srv_ip, mbit=300)
+        _kill_traffic(hatk2)
+        return
+
+    if phase == "icmp_flood":
+        start_icmp_flood(hatk1, srv_ip)
+        _kill_traffic(hatk2)
+        return
+
+    if phase == "multi_vector":
+        start_multi_vector(hatk1, hatk2, srv_ip)
+        return
+
+    _kill_traffic(hatk1)
+    _kill_traffic(hatk2)
+
+
+# ----------------------------
+# Args
+# ----------------------------
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", default="models/ppo/final_model.zip")
+    p.add_argument("--out", default="experiments/mininet_ppo.csv")
+    p.add_argument("--interval", type=float, default=1.0)
+    p.add_argument("--capacity_mbit", type=float, default=100.0)
+    p.add_argument("--deterministic", action="store_true")
+
+    # LIVE mode
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="Keep Mininet CLI open; run PPO loop in background; you launch attacks manually.",
+    )
+    p.add_argument(
+        "--live_silent",
+        action="store_true",
+        help="LIVE mode: do not print PPO loop lines at all (recommended).",
+    )
+    p.add_argument(
+        "--live_print_every",
+        type=int,
+        default=0,
+        help="LIVE mode: print once every N iterations (0 = never).",
+    )
+    p.add_argument(
+        "--live_log",
+        default="",
+        help="LIVE mode: append PPO loop lines to this file (no terminal spam).",
+    )
+    p.add_argument(
+        "--live_allow_destructive",
+        action="store_true",
+        help="LIVE mode: allow BLOCK_* actions. Default is safer: only {ALLOW_ALL, RATE_LIMIT_TCP, GLOBAL_RATE_LIMIT}.",
+    )
+
+    p.add_argument(
+        "--no_teardown",
+        action="store_true",
+        help="Do not stop Mininet on exit (debugging only).",
+    )
+    return p.parse_args()
+
+
+# ----------------------------
+# LIVE PPO LOOP
+# ----------------------------
+def _maybe_write_live(
+    line: str,
+    *,
+    silent: bool,
+    print_every: int,
+    iteration: int,
+    log_path: str,
+) -> None:
+    # file logging (always allowed)
+    if log_path:
+        try:
+            with open(log_path, "a") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+    # terminal printing
+    if silent:
+        return
+    if print_every <= 0:
+        return
+    if iteration % print_every == 0:
+        info(line + "\n")
+
+
+def ppo_live_loop(net, model, adapter, ifaces, args, start_t, stop_event):
+    import csv
+    fw = net.get("fw")
+    mon = net.get("hleg2")
+    srv_ip = "10.0.2.10"
+    last_action = 0
+    adapter.prev = adapter.sample_pre(fw)
+    allowed_safe = {0, 1, 7}  # ALLOW_ALL, RATE_LIMIT_TCP, GLOBAL_RATE_LIMIT
+    it = 0
+    
+    # === NEW: Open CSV file for live mode ===
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    fcsv = open(args.out, "w", newline="")
+    writer = csv.writer(fcsv)
+    # Write CSV header (same as automated mode)
+    writer.writerow([
+        "t", "phase", "action", "action_name",
+        "pkt_rate_total_pre", "bytes_rate_total_pre",
+        "tcp_rate_pre", "udp_rate_pre", "icmp_rate_pre",
+        "syn_rate_pre", "ack_rate_pre", "syn_ack_ratio_pre",
+        "latency_ms_post", "loss_post", "queue_proxy_post",
+        "firewall_mode", "rate_limit_level", "legit_mbps"
+    ])
+    fcsv.flush()  # Ensure header is written immediately
+    # === END NEW ===
+    
+    while not stop_event.is_set():
+        loop_t = time.time()
+        it += 1
+        
+        # PRE metrics
+        cur = adapter.sample_pre(fw)
+        rates = adapter.rates_from_delta(cur, adapter.prev)
+        adapter.prev = cur
+        
+        # POST metrics
+        try:
+            latency_ms, loss = ping_latency_and_loss(mon, srv_ip)
+        except AssertionError:
+            # CLI might have interacted with mon; skip this iteration safely
+            time.sleep(args.interval)
+            continue
+        
+        fw_mode, rate_level = action_to_mode_level(last_action)
+        obs = adapter.build_obs(
+            rates=rates,
+            latency_ms_post=latency_ms,
+            loss_post=loss,
+            firewall_mode=fw_mode,
+            rate_limit_level=rate_level,
+        )
+        
+        action, _ = model.predict(obs, deterministic=args.deterministic)
+        action = int(action)
+        
+        # LIVE safety gate (default ON)
+        if not args.live_allow_destructive and action not in allowed_safe:
+            action = 1  # RATE_LIMIT_TCP fallback
+        
+        action_name = apply_action(fw, action, ifaces)
+        last_action = action
+        
+        # === NEW: Write to CSV ===
+        t_elapsed = round(time.time() - start_t, 1)
+        writer.writerow([
+            t_elapsed,
+            "live",  # phase
+            action,
+            action_name,
+            rates.get("pkt_rate_total_pre", 0),
+            rates.get("bytes_rate_total_pre", 0),
+            rates.get("tcp_rate_pre", 0),
+            rates.get("udp_rate_pre", 0),
+            rates.get("icmp_rate_pre", 0),
+            rates.get("syn_rate_pre", 0),
+            rates.get("ack_rate_pre", 0),
+            rates.get("syn_ack_ratio_pre", 0),
+            latency_ms,
+            loss,
+            0,  # queue_proxy (not used)
+            fw_mode,
+            rate_level,
+            0,  # legit_mbps (calculate if needed)
+        ])
+        fcsv.flush()  # Write immediately so dashboard can read
+        # === END NEW ===
+        
+        line = (
+            f"[t={t_elapsed}s] "
+            f"action={action} ({action_name}) "
+            f"lat={latency_ms:.1f}ms loss={loss:.2f} "
+            f"syn/ack={rates.get('syn_ack_ratio_pre', 0.0):.2f}"
+        )
+        _maybe_write_live(
+            line,
+            silent=args.live_silent,
+            print_every=args.live_print_every,
+            iteration=it,
+            log_path=args.live_log,
+        )
+        
+        # stable interval
+        elapsed = time.time() - loop_t
+        time.sleep(max(0.0, args.interval - elapsed))
+    
+    # === NEW: Close CSV file ===
+    fcsv.close()
+    # === END NEW ===
+
+# ----------------------------
+# Main
+# ----------------------------
+def main() -> None:
+    args = parse_args()
+    setLogLevel("info")
+
+    # Avoid "RTNETLINK answers: File exists"
+    info("\n*** Cleaning up old Mininet state\n")
+    os.system("mn -c > /dev/null 2>&1")
+
+    info(f"\n*** Loading PPO model: {args.model}\n")
+    model = PPO.load(args.model)
+
+    topo = DDoSFirewallTopo()
+    net = Mininet(
+        topo=topo,
+        controller=None,
+        switch=OVSSwitch,
+        link=TCLink,
+        autoSetMacs=True,
+        autoStaticArp=True,
+        build=False,
+    )
+
+    info("\n*** Building & starting Mininet\n")
+    net.build()
+    net.start()
+
+    fcsv: Optional[object] = None
+    writer: Optional[csv.writer] = None
+    start_t = time.time()
+
+    try:
+        setup_ip_routing(net)
+        #install_mncount_rules(net.get("fw")) 
+        fw = net.get("fw")
+        srv = net.get("srv")
+        hleg1 = net.get("hleg1")
+        hleg2 = net.get("hleg2")
+        hatk1 = net.get("hatk1")
+        hatk2 = net.get("hatk2")
+
+        srv_ip = "10.0.2.10"
+
+        # Start iperf server (Laravel should be started by you on srv:80)
+        start_services_on_server(srv)
+
+        # Keep legit traffic running in both modes
+        start_legit_generators(hleg1, hleg2, srv_ip, http_port=80)
+
+        ifaces = detect_fw_ifaces(fw)
+
+        # Reset firewall + install counting rules
+        reset_firewall(fw, ifaces)
+        install_counting_rules(fw, ifaces.lan, ifaces.wan)
+
+        adapter = MininetFeatureAdapter(
+            LinkConfig(wan_capacity_mbit=args.capacity_mbit, interval_s=args.interval)
+        )
+        adapter.prev = adapter.sample_pre(fw)
+
+        # ---------------- LIVE MODE ----------------
+        if args.live:
+            stop_event = threading.Event()
+            t = threading.Thread(
+                target=ppo_live_loop,
+                args=(net, model, adapter, ifaces, args, start_t, stop_event),
+                daemon=True,
+            )
+            t.start()
+
+            # IMPORTANT: keep CLI usable by default (silent)
+            if not args.live_print_every and not args.live_log and not args.live_silent:
+                # If user didn't pick any output control, default to silent to protect CLI
+                args.live_silent = True
+
+            info("\n*** LIVE MODE\n")
+            info("*** You should have a usable `mininet>` prompt.\n")
+            info("*** Start attacks like:\n")
+            info("***   hatk1 hping3 -S -p 80 --flood --rand-source 10.0.2.10\n")
+            info("***   hatk2 iperf3 -u -c 10.0.2.10 -b 300M -t 3600 &\n")
+            info("*** Stop attacks:\n")
+            info("***   hatk1 pkill -f hping3\n")
+            info("***   hatk2 pkill -f iperf3\n\n")
+
+            CLI(net)  # <-- mininet> prompt
+
+            stop_event.set()
+            t.join(timeout=2)
+            return
+
+        # ---------------- AUTOMATED MODE ----------------
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+        fcsv = open(args.out, "w", newline="")
+        writer = csv.writer(fcsv)
+        writer.writerow([
+            "t",
+            "phase",
+            "action",
+            "action_name",
+            "pkt_rate_total_pre",
+            "bytes_rate_total_pre",
+            "tcp_rate_pre",
+            "udp_rate_pre",
+            "icmp_rate_pre",
+            "syn_rate_pre",
+            "ack_rate_pre",
+            "syn_ack_ratio_pre",
+            "latency_ms_post",
+            "loss_post",
+            "queue_proxy_post",
+            "firewall_mode",
+            "rate_limit_level",
+            "legit_mbps",
+        ])
+        fcsv.flush()
+
+        last_action = 0
+
+        for phase in DEFAULT_PHASES:
+            info(f"\n=== Phase: {phase.name} ({phase.duration_s}s) ===\n")
+            apply_phase(phase.name, hleg1, hatk1, hatk2, srv_ip)
+
+            phase_end = time.time() + phase.duration_s
+
+            while time.time() < phase_end:
+                loop_t = time.time()
+
+                cur = adapter.sample_pre(fw)
+                rates = adapter.rates_from_delta(cur, adapter.prev)
+                adapter.prev = cur
+
+                latency_ms, loss = ping_latency_and_loss(hleg1, srv_ip)
+                fw_mode, rate_level = action_to_mode_level(last_action)
+
+                obs = adapter.build_obs(
+                    rates=rates,
+                    latency_ms_post=latency_ms,
+                    loss_post=loss,
+                    firewall_mode=fw_mode,
+                    rate_limit_level=rate_level,
+                )
+
+                if phase.name in ("warmup_legit", "cooldown_legit"):
+                    action = 0
+                else:
+                    action, _ = model.predict(obs, deterministic=args.deterministic)
+                    action = int(action)
+
+                action_name = apply_action(fw, action, ifaces)
+                last_action = action
+
+                legit_mbps = read_legit_iperf_mbps(hleg1)
+
+                info(
+                    f"[t={round(time.time()-start_t, 1)}s] "
+                    f"phase={phase.name} action={action} ({action_name}) "
+                    f"lat={latency_ms:.1f}ms loss={loss:.2f} "
+                    f"syn/ack={rates.get('syn_ack_ratio_pre', 0.0):.2f}\n"
+                )
+
+                writer.writerow([
+                    round(time.time() - start_t, 3),
+                    phase.name,
+                    action,
+                    action_name,
+                    round(rates.get("pkt_rate_total_pre", 0.0), 3),
+                    round(rates.get("bytes_rate_total_pre", 0.0), 3),
+                    round(rates.get("tcp_rate_pre", 0.0), 3),
+                    round(rates.get("udp_rate_pre", 0.0), 3),
+                    round(rates.get("icmp_rate_pre", 0.0), 3),
+                    round(rates.get("syn_rate_pre", 0.0), 3),
+                    round(rates.get("ack_rate_pre", 0.0), 3),
+                    round(rates.get("syn_ack_ratio_pre", 0.0), 3),
+                    round(latency_ms, 3),
+                    round(loss, 3),
+                    round(rates.get("queue_proxy_post", 0.0), 3),
+                    fw_mode,
+                    rate_level,
+                    round(legit_mbps, 3),
+                ])
+                fcsv.flush()
+
+                elapsed = time.time() - loop_t
+                time.sleep(max(0.0, args.interval - elapsed))
+
+        info(f"\n*** Done. CSV saved to: {args.out}\n")
+
+    finally:
+        # Stop background generators
+        try:
+            stop_legit_generators(net.get("hleg1"), net.get("hleg2"))
+        except Exception:
+            pass
+
+        # Stop traffic on attackers
+        try:
+            _kill_traffic(net.get("hatk1"))
+            _kill_traffic(net.get("hatk2"))
+        except Exception:
+            pass
+
+        # Stop iperf server
+        try:
+            net.get("srv").cmd("pkill -f 'iperf3 -s' 2>/dev/null || true")
+        except Exception:
+            pass
+
+        try:
+            if fcsv:
+                fcsv.close()
+        except Exception:
+            pass
+
+        if not args.no_teardown:
+            net.stop()
+
+
+if __name__ == "__main__":
+    main()

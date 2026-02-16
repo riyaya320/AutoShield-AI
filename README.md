@@ -187,23 +187,8 @@ AutoShield AI implements responsible autonomous security:
 
 ---
 
-## 📝 Citation
-```bibtex
-@mastersthesis{autoshield2026,
-  title={AutoShield AI: PPO-Based Autonomous DDoS Mitigation for SME Networks},
-  author={Your Name},
-  year={2026},
-  school={Your University}
-}
-```
 
----
 
-## 📄 License
-
-MIT License - See LICENSE file for details
-
----
 
 ## 🙏 Acknowledgments
 
@@ -213,7 +198,4 @@ MIT License - See LICENSE file for details
 
 ---
 
-## 📧 Contact
 
-For questions or collaboration: your.email@example.com
-EOF
